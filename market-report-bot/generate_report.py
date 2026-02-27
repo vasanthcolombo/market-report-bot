@@ -18,11 +18,8 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-import smtplib
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.mime.text import MIMEText
-from email import encoders
+import resend
+import base64
 import os
 import json
 
@@ -406,48 +403,47 @@ def build_pdf(equity_df, crypto_df, bonds, metals, filename="market_report.pdf")
 # ─── Email Sending ───────────────────────────────────────────────────────────
 
 def send_email(pdf_path):
-    """Send report via Gmail SMTP."""
-    sender = os.environ.get("EMAIL_SENDER")
-    password = os.environ.get("EMAIL_PASSWORD")  # Gmail App Password
+    """Send report via Resend API."""
+    api_key = os.environ.get("RESEND_API_KEY")
+    sender = os.environ.get("EMAIL_SENDER", "Market Dashboard <reports@yourdomain.com>")
     recipient = os.environ.get("EMAIL_RECIPIENT")
 
-    if not all([sender, password, recipient]):
-        print("Email credentials not set. Skipping email.")
-        print("Set EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT as env vars.")
+    if not all([api_key, recipient]):
+        print("Resend credentials not set. Skipping email.")
+        print("Set RESEND_API_KEY and EMAIL_RECIPIENT as env vars.")
         return False
+
+    resend.api_key = api_key
 
     now = datetime.utcnow() + timedelta(hours=8)
     subject = f"Daily Market Dashboard — {now.strftime('%b %d, %Y')}"
 
-    msg = MIMEMultipart()
-    msg["From"] = sender
-    msg["To"] = recipient
-    msg["Subject"] = subject
-
-    body = (
-        f"Good morning!\n\n"
-        f"Attached is your daily market dashboard for {now.strftime('%A, %B %d, %Y')}.\n\n"
-        f"Covers: SPY, QQQ, IGV, 11 S&P sector ETFs, BTC, ETH, "
-        f"US Treasury yields, Japan 10Y, Gold & Silver.\n\n"
-        f"— Auto-generated at {now.strftime('%I:%M %p')} SGT"
-    )
-    msg.attach(MIMEText(body, "plain"))
-
     with open(pdf_path, "rb") as f:
-        part = MIMEBase("application", "octet-stream")
-        part.set_payload(f.read())
-        encoders.encode_base64(part)
-        part.add_header(
-            "Content-Disposition",
-            f"attachment; filename=Market_Dashboard_{now.strftime('%Y%m%d')}.pdf"
-        )
-        msg.attach(part)
+        pdf_content = f.read()
 
     try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(sender, password)
-            server.sendmail(sender, recipient, msg.as_string())
-        print(f"Email sent to {recipient}")
+        params = {
+            "from": sender,
+            "to": [recipient],
+            "subject": subject,
+            "html": (
+                f"<p>Good morning!</p>"
+                f"<p>Attached is your daily market dashboard for "
+                f"<strong>{now.strftime('%A, %B %d, %Y')}</strong>.</p>"
+                f"<p>Covers: SPY, QQQ, IGV, 11 S&P sector ETFs, BTC, ETH, "
+                f"US Treasury yields, Japan 10Y, Gold &amp; Silver.</p>"
+                f"<p style='color:#888; font-size:12px;'>"
+                f"Auto-generated at {now.strftime('%I:%M %p')} SGT</p>"
+            ),
+            "attachments": [
+                {
+                    "filename": f"Market_Dashboard_{now.strftime('%Y%m%d')}.pdf",
+                    "content": list(pdf_content),
+                }
+            ],
+        }
+        email = resend.Emails.send(params)
+        print(f"Email sent to {recipient} (ID: {email.get('id', 'unknown')})")
         return True
     except Exception as e:
         print(f"Email failed: {e}")
