@@ -1,9 +1,9 @@
 """
 Daily Market Dashboard Report Generator
 Fetches live data from Yahoo Finance, generates a professional PDF,
-and emails it as an attachment.
+and sends it to Telegram.
 
-Scheduled via GitHub Actions at 7:00 AM SGT (23:00 UTC previous day).
+Scheduled via GitHub Actions at 6:00 AM SGT (22:00 UTC previous day).
 """
 
 import yfinance as yf
@@ -18,8 +18,7 @@ from reportlab.platypus import (
 )
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
-import resend
-import base64
+import requests
 import os
 import json
 
@@ -400,53 +399,49 @@ def build_pdf(equity_df, crypto_df, bonds, metals, filename="market_report.pdf")
     return filename
 
 
-# ─── Email Sending ───────────────────────────────────────────────────────────
+# ─── Telegram Sending ────────────────────────────────────────────────────────
 
-def send_email(pdf_path):
-    """Send report via Resend API."""
-    api_key = os.environ.get("RESEND_API_KEY")
-    sender = os.environ.get("EMAIL_SENDER", "Market Dashboard <reports@yourdomain.com>")
-    recipient = os.environ.get("EMAIL_RECIPIENT")
+def send_telegram(pdf_path):
+    """Send report PDF to Telegram chat via Bot API."""
+    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
 
-    if not all([api_key, recipient]):
-        print("Resend credentials not set. Skipping email.")
-        print("Set RESEND_API_KEY and EMAIL_RECIPIENT as env vars.")
+    if not all([bot_token, chat_id]):
+        print("Telegram credentials not set. Skipping.")
+        print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID as env vars.")
         return False
 
-    resend.api_key = api_key
-
     now = datetime.utcnow() + timedelta(hours=8)
-    subject = f"Daily Market Dashboard — {now.strftime('%b %d, %Y')}"
+    caption = (
+        f"📊 *Daily Market Dashboard*\n"
+        f"_{now.strftime('%A, %B %d, %Y')}_\n\n"
+        f"SPY · QQQ · IGV · 11 Sector ETFs\n"
+        f"BTC · ETH · US Yields · Gold · Silver"
+    )
 
-    with open(pdf_path, "rb") as f:
-        pdf_content = f.read()
+    url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
 
     try:
-        params = {
-            "from": sender,
-            "to": [recipient],
-            "subject": subject,
-            "html": (
-                f"<p>Good morning!</p>"
-                f"<p>Attached is your daily market dashboard for "
-                f"<strong>{now.strftime('%A, %B %d, %Y')}</strong>.</p>"
-                f"<p>Covers: SPY, QQQ, IGV, 11 S&P sector ETFs, BTC, ETH, "
-                f"US Treasury yields, Japan 10Y, Gold &amp; Silver.</p>"
-                f"<p style='color:#888; font-size:12px;'>"
-                f"Auto-generated at {now.strftime('%I:%M %p')} SGT</p>"
-            ),
-            "attachments": [
-                {
-                    "filename": f"Market_Dashboard_{now.strftime('%Y%m%d')}.pdf",
-                    "content": list(pdf_content),
-                }
-            ],
-        }
-        email = resend.Emails.send(params)
-        print(f"Email sent to {recipient} (ID: {email.get('id', 'unknown')})")
-        return True
+        with open(pdf_path, "rb") as f:
+            resp = requests.post(
+                url,
+                data={
+                    "chat_id": chat_id,
+                    "caption": caption,
+                    "parse_mode": "Markdown",
+                },
+                files={"document": (f"Market_Dashboard_{now.strftime('%Y%m%d')}.pdf", f, "application/pdf")},
+                timeout=30,
+            )
+        result = resp.json()
+        if result.get("ok"):
+            print(f"Telegram: PDF sent to chat {chat_id}")
+            return True
+        else:
+            print(f"Telegram error: {result.get('description', 'unknown')}")
+            return False
     except Exception as e:
-        print(f"Email failed: {e}")
+        print(f"Telegram failed: {e}")
         return False
 
 
@@ -477,8 +472,8 @@ def main():
     print("[5/5] Generating PDF report...")
     pdf_path = build_pdf(equity_df, crypto_df, bonds, metals)
 
-    print("\nSending email...")
-    send_email(pdf_path)
+    print("\nSending to Telegram...")
+    send_telegram(pdf_path)
 
     print("\nDone!")
 
