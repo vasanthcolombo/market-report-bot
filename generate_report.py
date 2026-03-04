@@ -42,9 +42,50 @@ EQUITY_TICKERS = [
     ("XLRE", "Real Estate"),
 ]
 
+MAG7_TICKERS = [
+    ("AAPL",  "Apple"),
+    ("MSFT",  "Microsoft"),
+    ("GOOGL", "Alphabet"),
+    ("AMZN",  "Amazon"),
+    ("META",  "Meta Platforms"),
+    ("NVDA",  "NVIDIA"),
+    ("TSLA",  "Tesla"),
+]
+
+DEFENSE_TICKERS = [
+    ("KDEF", "Kinetics Defense ETF"),
+    ("ITA",  "iShares Aerospace & Defense"),
+]
+
+GLOBAL_INDEX_TICKERS = [
+    ("^NSEI",     "India — Nifty 50"),
+    ("^STI",      "Singapore — STI"),
+    ("^N225",     "Japan — Nikkei 225"),
+    ("^KS11",     "South Korea — KOSPI"),
+    ("^FTSE",     "London — FTSE 100"),
+    ("^AXJO",     "Australia — ASX 200"),
+    ("^STOXX50E", "Europe — Euro Stoxx 50"),
+]
+
+CURRENCY_TICKERS = [
+    ("DX-Y.NYB", "USD Index (DXY)"),
+    ("USDSGD=X", "USD / SGD"),
+    ("SGDUSD=X", "SGD / USD"),
+    ("EURUSD=X", "EUR / USD"),
+    ("AUDUSD=X", "AUD / USD"),
+    ("GBPUSD=X", "GBP / USD"),
+    ("JPYUSD=X", "JPY / USD"),
+]
+
 CRYPTO_TICKERS = [
     ("BTC-USD", "Bitcoin"),
     ("ETH-USD", "Ethereum"),
+    ("FBTC",    "Fidelity Bitcoin ETF"),
+    ("BMNR",    "Bitmine Immersion Tech"),
+]
+
+WTI_TICKERS = [
+    ("CL=F", "WTI Crude Oil"),
 ]
 
 BOND_TICKERS = [
@@ -61,6 +102,12 @@ EXTRA_TICKERS = [
     ("GLD",   "SPDR Gold ETF"),
     ("SLV",   "iShares Silver ETF"),
 ]
+
+# Standard CME futures month codes
+MONTH_CODES = {
+    1: 'F', 2: 'G', 3: 'H', 4: 'J', 5: 'K', 6: 'M',
+    7: 'N', 8: 'Q', 9: 'U', 10: 'V', 11: 'X', 12: 'Z',
+}
 
 LOOKBACK_PERIODS = {
     "1D":  1,
@@ -115,6 +162,67 @@ def fetch_returns(tickers_with_names, period="5y"):
     return pd.DataFrame(results)
 
 
+def fetch_vix_data():
+    """Fetch VIX index: close, intraday high/low, 52-week high/low."""
+    try:
+        hist = yf.Ticker("^VIX").history(period="1y")
+        if hist.empty:
+            return None
+        latest = hist.iloc[-1]
+        return {
+            "Ticker": "^VIX",
+            "Name": "CBOE Volatility Index",
+            "Close": float(latest["Close"]),
+            "Intraday High": float(latest["High"]),
+            "Intraday Low": float(latest["Low"]),
+            "52W High": float(hist["High"].max()),
+            "52W Low": float(hist["Low"].min()),
+        }
+    except Exception as e:
+        print(f"Error fetching VIX: {e}")
+        return None
+
+
+def fetch_wti_futures():
+    """Fetch WTI crude spot (CL=F) + next 2 calendar month futures."""
+    now = datetime.utcnow()
+
+    contracts = [("CL=F", "Spot / Front Month")]
+    for offset in [1, 2]:
+        m = now.month + offset
+        y = now.year
+        if m > 12:
+            m -= 12
+            y += 1
+        ticker = f"CL{MONTH_CODES[m]}{str(y)[-2:]}.NYM"
+        label = datetime(y, m, 1).strftime("%b %Y") + " Futures"
+        contracts.append((ticker, label))
+
+    results = []
+    for ticker, label in contracts:
+        try:
+            hist = yf.Ticker(ticker).history(period="5d")
+            if hist.empty:
+                continue
+            s = hist["Close"].dropna()
+            if len(s) < 1:
+                continue
+            price = float(s.iloc[-1])
+            chg_1d = float(s.iloc[-1] - s.iloc[-2]) if len(s) >= 2 else None
+            chg_1d_pct = (chg_1d / float(s.iloc[-2])) if chg_1d is not None else None
+            results.append({
+                "Contract": ticker,
+                "Description": label,
+                "Price": price,
+                "1D Chg ($)": chg_1d,
+                "1D Chg (%)": chg_1d_pct,
+            })
+        except Exception as e:
+            print(f"Error fetching {ticker}: {e}")
+
+    return results
+
+
 def fetch_bond_yields():
     """Fetch bond yield proxies and compute daily changes."""
     symbols = ["^TNX", "^TYX", "^IRX"]
@@ -126,13 +234,9 @@ def fetch_bond_yields():
     except Exception:
         return []
 
-    # Also try to get 2Y yield
     try:
         two_yr = yf.download("2YY=F", period="1y", auto_adjust=True, progress=False)
-        if not two_yr.empty:
-            two_yr_close = two_yr["Close"]
-        else:
-            two_yr_close = None
+        two_yr_close = two_yr["Close"] if not two_yr.empty else None
     except Exception:
         two_yr_close = None
 
@@ -150,7 +254,7 @@ def fetch_bond_yields():
         if len(s) < 2:
             continue
         current = s.iloc[-1]
-        day_chg = (s.iloc[-1] - s.iloc[-2]) * 100 if len(s) >= 2 else 0  # in bps (data is in %)
+        day_chg = (s.iloc[-1] - s.iloc[-2]) * 100 if len(s) >= 2 else 0  # in bps
         week_chg = (s.iloc[-1] - s.iloc[-6]) * 100 if len(s) >= 6 else 0
         month_chg = (s.iloc[-1] - s.iloc[-22]) * 100 if len(s) >= 22 else 0
         results.append({
@@ -211,17 +315,6 @@ def fetch_metals():
     return results
 
 
-def fetch_japan_10y():
-    """Try to fetch Japan 10Y bond yield proxy."""
-    try:
-        data = yf.download("IGOV", period="1mo", auto_adjust=True, progress=False)
-        # IGOV is intl govt bond ETF — not a direct proxy but gives some signal
-        # For a production system, you'd use a dedicated bond API
-        return None  # Placeholder — see note in PDF
-    except Exception:
-        return None
-
-
 # ─── PDF Generation ──────────────────────────────────────────────────────────
 
 def color_cell(val):
@@ -238,7 +331,10 @@ def fmt_pct(val):
     return f"{val:+.2%}"
 
 
-def build_pdf(equity_df, crypto_df, bonds, metals, filename="market_report.pdf"):
+def build_pdf(equity_df, crypto_df, bonds, metals,
+              mag7_df=None, defense_df=None, global_df=None,
+              currency_df=None, wti_df=None, wti_futures=None,
+              vix_data=None, filename="market_report.pdf"):
     """Build professional PDF report."""
     now = datetime.utcnow() + timedelta(hours=8)  # SGT
     date_str = now.strftime("%A, %B %d, %Y")
@@ -276,7 +372,7 @@ def build_pdf(equity_df, crypto_df, bonds, metals, filename="market_report.pdf")
     story.append(HRFlowable(width="100%", color=colors.HexColor("#1F4E79"), thickness=1.5))
     story.append(Spacer(1, 6))
 
-    # ── Helper: build a returns table ──
+    # ── Helper: standard returns table (Ticker/Name/Price/1D-3Y) ──
     def make_returns_table(df, section_title):
         story.append(Paragraph(section_title, styles["SectionHead"]))
 
@@ -297,7 +393,7 @@ def build_pdf(equity_df, crypto_df, bonds, metals, filename="market_report.pdf")
                 fmt_pct(row.get("3Y")),
             ])
 
-        col_widths = [38, 95, 48, 42, 42, 42, 42, 42, 42, 42]
+        col_widths = [62, 105, 48, 42, 42, 42, 42, 42, 42, 42]  # 509pt total, fits A4 510pt
         t = Table(table_data, colWidths=col_widths, repeatRows=1)
 
         style_cmds = [
@@ -329,13 +425,124 @@ def build_pdf(equity_df, crypto_df, bonds, metals, filename="market_report.pdf")
         story.append(t)
         story.append(Spacer(1, 4))
 
+    # ── Helper: VIX table ──
+    def make_vix_table(vix):
+        story.append(Paragraph("Volatility — VIX Index (^VIX)", styles["SectionHead"]))
+        headers = ["Ticker", "Name", "Close", "Intraday High", "Intraday Low", "52W High", "52W Low"]
+        data_row = [
+            vix["Ticker"],
+            vix["Name"],
+            f"{vix['Close']:.2f}",
+            f"{vix['Intraday High']:.2f}",
+            f"{vix['Intraday Low']:.2f}",
+            f"{vix['52W High']:.2f}",
+            f"{vix['52W Low']:.2f}",
+        ]
+        table_data = [headers, data_row]
+        col_widths = [42, 140, 50, 62, 62, 57, 57]  # 470 total
+        t = Table(table_data, colWidths=col_widths, repeatRows=1)
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#4A235A")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("ALIGN", (2, 0), (-1, -1), "CENTER"),
+            ("ALIGN", (0, 0), (1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D0D0D0")),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ]))
+        story.append(t)
+        story.append(Spacer(1, 4))
+
+    # ── Helper: WTI futures term structure table ──
+    def make_wti_futures_table(futures):
+        story.append(Paragraph("WTI Crude Oil — Futures Term Structure", styles["SectionHead"]))
+        if not futures:
+            story.append(Paragraph("No futures data available.", styles["SmallNote"]))
+            return
+
+        headers = ["Contract", "Description", "Price (USD)", "1D Chg ($)", "1D Chg (%)"]
+        table_data = [headers]
+        sign_data = {}  # row_idx -> {col_idx: val} for coloring
+
+        for i, row in enumerate(futures):
+            price = row["Price"]
+            chg_d = row["1D Chg ($)"]
+            chg_pct = row["1D Chg (%)"]
+            sign_data[i + 1] = {3: chg_d, 4: chg_pct}
+            table_data.append([
+                row["Contract"],
+                row["Description"],
+                f"${price:,.2f}" if price is not None else "—",
+                (f"{'+' if chg_d >= 0 else ''}{chg_d:.2f}" if chg_d is not None else "—"),
+                fmt_pct(chg_pct) if chg_pct is not None else "—",
+            ])
+
+        col_widths = [80, 130, 75, 75, 75]  # 435 total
+        t = Table(table_data, colWidths=col_widths, repeatRows=1)
+
+        style_cmds = [
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#5C4033")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("ALIGN", (2, 0), (-1, -1), "CENTER"),
+            ("ALIGN", (0, 0), (1, -1), "LEFT"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#D0D0D0")),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#FFF3E0")]),
+            ("TOPPADDING", (0, 0), (-1, -1), 3),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ]
+        for row_idx, cols in sign_data.items():
+            for col_idx, val in cols.items():
+                if val is not None:
+                    style_cmds.append(
+                        ("TEXTCOLOR", (col_idx, row_idx), (col_idx, row_idx), color_cell(val))
+                    )
+        t.setStyle(TableStyle(style_cmds))
+        story.append(t)
+        story.append(Spacer(1, 4))
+
+    # ── Global Market Indices ──
+    if global_df is not None and not global_df.empty:
+        make_returns_table(global_df, "Global Market Indices")
+
+    # ── Currency Moves ──
+    if currency_df is not None and not currency_df.empty:
+        make_returns_table(currency_df, "Currency Moves")
+
     # ── Equity & Sector Returns ──
     if not equity_df.empty:
         make_returns_table(equity_df, "Equity & Sector ETF Returns")
 
+    # ── Magnificent 7 ──
+    if mag7_df is not None and not mag7_df.empty:
+        make_returns_table(mag7_df, "Magnificent 7 — Stock Returns")
+
+    # ── Defense ETFs ──
+    if defense_df is not None and not defense_df.empty:
+        make_returns_table(defense_df, "Defense & Aerospace ETFs (KDEF · ITA)")
+
     # ── Crypto Returns ──
     if not crypto_df.empty:
         make_returns_table(crypto_df, "Cryptocurrency Returns")
+
+    # ── VIX ──
+    if vix_data:
+        make_vix_table(vix_data)
+
+    # ── WTI Crude Returns ──
+    if wti_df is not None and not wti_df.empty:
+        make_returns_table(wti_df, "WTI Crude Oil — Price Returns")
+
+    # ── WTI Futures Term Structure ──
+    if wti_futures:
+        make_wti_futures_table(wti_futures)
 
     # ── Bond Yields ──
     if bonds:
@@ -415,8 +622,8 @@ def send_telegram(pdf_path):
     caption = (
         f"📊 *Daily Market Dashboard*\n"
         f"_{now.strftime('%A, %B %d, %Y')}_\n\n"
-        f"SPY · QQQ · IGV · 11 Sector ETFs\n"
-        f"BTC · ETH · US Yields · Gold · Silver"
+        f"SPY · QQQ · Mag7 · Defense ETFs\n"
+        f"BTC · ETH · VIX · WTI · US Yields · Gold · Silver"
     )
 
     url = f"https://api.telegram.org/bot{bot_token}/sendDocument"
@@ -453,24 +660,57 @@ def main():
     print(f"Run time: {(datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M SGT')}")
     print("=" * 60)
 
-    print("\n[1/5] Fetching equity & sector data...")
+    print("\n[1/11] Fetching equity & sector data...")
     equity_df = fetch_returns(EQUITY_TICKERS)
     print(f"  → {len(equity_df)} tickers fetched")
 
-    print("[2/5] Fetching crypto data...")
+    print("[2/11] Fetching Magnificent 7 stocks...")
+    mag7_df = fetch_returns(MAG7_TICKERS)
+    print(f"  → {len(mag7_df)} tickers fetched")
+
+    print("[3/11] Fetching defense ETFs (KDEF, ITA)...")
+    defense_df = fetch_returns(DEFENSE_TICKERS)
+    print(f"  → {len(defense_df)} tickers fetched")
+
+    print("[4/11] Fetching global market indices...")
+    global_df = fetch_returns(GLOBAL_INDEX_TICKERS)
+    print(f"  → {len(global_df)} indices fetched")
+
+    print("[5/11] Fetching currency moves...")
+    currency_df = fetch_returns(CURRENCY_TICKERS)
+    print(f"  → {len(currency_df)} pairs fetched")
+
+    print("[6/11] Fetching crypto data...")
     crypto_df = fetch_returns(CRYPTO_TICKERS, period="5y")
     print(f"  → {len(crypto_df)} tickers fetched")
 
-    print("[3/5] Fetching bond yields...")
+    print("[7/11] Fetching VIX data...")
+    vix_data = fetch_vix_data()
+    print(f"  → {'fetched' if vix_data else 'unavailable'}")
+
+    print("[8/11] Fetching WTI crude returns...")
+    wti_df = fetch_returns(WTI_TICKERS)
+    print(f"  → {len(wti_df)} tickers fetched")
+
+    print("[9/11] Fetching WTI futures term structure...")
+    wti_futures = fetch_wti_futures()
+    print(f"  → {len(wti_futures)} contracts fetched")
+
+    print("[10/11] Fetching bond yields...")
     bonds = fetch_bond_yields()
     print(f"  → {len(bonds)} bond maturities fetched")
 
-    print("[4/5] Fetching precious metals...")
+    print("[11/11] Fetching precious metals...")
     metals = fetch_metals()
     print(f"  → {len(metals)} metals fetched")
 
-    print("[5/5] Generating PDF report...")
-    pdf_path = build_pdf(equity_df, crypto_df, bonds, metals)
+    print("\nGenerating PDF report...")
+    pdf_path = build_pdf(
+        equity_df, crypto_df, bonds, metals,
+        mag7_df=mag7_df, defense_df=defense_df, global_df=global_df,
+        currency_df=currency_df, wti_df=wti_df, wti_futures=wti_futures,
+        vix_data=vix_data,
+    )
 
     print("\nSending to Telegram...")
     send_telegram(pdf_path)
